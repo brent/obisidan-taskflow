@@ -1,6 +1,6 @@
 {
   "name": "obsidian-taskflow",
-  "version": "1.0.0",
+  "version": "0.3.0",
   "description": "An Obsidian plugin to move files based on a checkbox frontmatter property.",
   "main": "main.js",
   "type": "module",
