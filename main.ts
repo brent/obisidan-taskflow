@@ -48,7 +48,7 @@ export default class TaskflowPlugin extends Plugin {
    * Called when the plugin is loaded.
    */
   async onload() {
-    await this.loadSettings();
+    const needsCounterScan = await this.loadSettings();
 
     this.addSettingTab(new TaskflowSettingTab(this.app, this));
 
@@ -83,6 +83,12 @@ export default class TaskflowPlugin extends Plugin {
         await this.processFile(file);
       })
     );
+
+    // Scan for the highest existing task number on first install or when
+    // upgrading from a version that didn't persist the counter.
+    if (needsCounterScan) {
+      this.app.workspace.onLayoutReady(() => this.detectTaskCounter());
+    }
   }
 
   /**
@@ -92,9 +98,13 @@ export default class TaskflowPlugin extends Plugin {
 
   /**
    * Loads settings from Obsidian's data storage.
+   * Returns true if taskCounter was absent (fresh install or legacy data),
+   * indicating that detectTaskCounter() should be run.
    */
-  async loadSettings() {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+  async loadSettings(): Promise<boolean> {
+    const savedData = await this.loadData();
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, savedData);
+    return !savedData || !('taskCounter' in savedData);
   }
 
   /**
@@ -102,6 +112,28 @@ export default class TaskflowPlugin extends Plugin {
    */
   async saveSettings() {
     await this.saveData(this.settings);
+  }
+
+  /**
+   * Scans the root folder for existing task files and sets taskCounter to
+   * one above the highest TASK number found. Falls back to 1 if none exist.
+   */
+  async detectTaskCounter(): Promise<void> {
+    const { rootFolder } = this.settings;
+    const files = this.app.vault.getMarkdownFiles();
+    let maxNum = 0;
+
+    for (const file of files) {
+      if (rootFolder && !file.path.startsWith(`${rootFolder}/`)) continue;
+      const match = file.name.match(/^\[TASK-(\d+)\]/);
+      if (match) {
+        const num = parseInt(match[1], 10);
+        if (num > maxNum) maxNum = num;
+      }
+    }
+
+    this.settings.taskCounter = maxNum + 1;
+    await this.saveSettings();
   }
 
   /**
@@ -184,7 +216,7 @@ export default class TaskflowPlugin extends Plugin {
    * Processes a given Markdown file to determine if it needs to be moved.
    * @param file The TFile object representing the Markdown file.
    */
-  private processing = new Set<string>();
+  processing = new Set<string>();
   async processFile(file: TFile) {
     const originalPath = file.path;
     if (this.processing.has(originalPath)) {
@@ -324,7 +356,10 @@ class CreateTaskModal extends Modal {
 
     await this.plugin.ensureFolder(targetFolder);
 
+    // Suppress processFile from reacting to the newly created file.
+    this.plugin.processing.add(filePath);
     const file = await this.app.vault.create(filePath, content);
+    setTimeout(() => this.plugin.processing.delete(filePath), 500);
 
     // Increment and persist the counter.
     this.plugin.settings.taskCounter = taskCounter + 1;
@@ -363,6 +398,7 @@ class TaskflowSettingTab extends PluginSettingTab {
         .onChange(async (value) => {
           this.plugin.settings.rootFolder = value;
           await this.plugin.saveSettings();
+          await this.plugin.detectTaskCounter();
         }));
 
     new Setting(containerEl)
