@@ -1,7 +1,7 @@
 {
   "id": "taskflow",
   "name": "Taskflow",
-  "version": "0.3.0",
+  "version": "0.3.3",
   "minAppVersion": "0.15.0",
   "description": "Moves files based on a frontmatter checkbox property.",
   "author": "brent",
