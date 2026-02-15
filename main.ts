@@ -71,6 +71,7 @@ export default class TaskflowPlugin extends Plugin {
         if (!this.settings.enableBacklog) return false;
         if (checking) return true;
         this.moveOutOfBacklog();
+        return true;
       },
     });
 
