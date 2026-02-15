@@ -127,7 +127,7 @@ export default class TaskflowPlugin extends Plugin {
       if (rootFolder && !file.path.startsWith(`${rootFolder}/`)) continue;
       const match = file.name.match(/^\[TASK-(\d+)\]/);
       if (match) {
-        const num = parseInt(match[1], 10);
+        const num = parseInt(match[1]!, 10);
         if (num > maxNum) maxNum = num;
       }
     }
@@ -507,5 +507,27 @@ class TaskflowSettingTab extends PluginSettingTab {
             await this.plugin.saveSettings();
           }));
     }
+
+    containerEl.createEl('h3', { text: 'Task Counter' });
+
+    new Setting(containerEl)
+      .setName('Next task number')
+      .setDesc('The number used for the next created task. Edit manually or rescan to set it from existing files.')
+      .addText(text => text
+        .setValue(String(this.plugin.settings.taskCounter))
+        .onChange(async (value) => {
+          const num = parseInt(value, 10);
+          if (!isNaN(num) && num > 0) {
+            this.plugin.settings.taskCounter = num;
+            await this.plugin.saveSettings();
+          }
+        }))
+      .addButton(button => button
+        .setButtonText('Rescan')
+        .setTooltip('Scan root folder for existing task files and set counter accordingly')
+        .onClick(async () => {
+          await this.plugin.detectTaskCounter();
+          this.display();
+        }));
   }
 }
