@@ -1,7 +1,0 @@
-{
-  "propertyName": "done",
-  "trueFolder": "todo/archive",
-  "falseFolder": "todo",
-  "enableCompletedDate": true,
-  "completedDatePropertyName": "finished"
-}
