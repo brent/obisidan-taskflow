@@ -3,7 +3,7 @@ import { App, Plugin, PluginSettingTab, Setting, TFile } from 'obsidian';
 import { formatInTimeZone } from 'date-fns-tz';
 
 // Define the interface for our plugin settings
-interface FileMoverPluginSettings {
+interface TaskflowPluginSettings {
   propertyName: string;
   trueFolder: string;
   falseFolder: string;
@@ -12,7 +12,7 @@ interface FileMoverPluginSettings {
 }
 
 // Define default settings for the plugin
-const DEFAULT_SETTINGS: FileMoverPluginSettings = {
+const DEFAULT_SETTINGS: TaskflowPluginSettings = {
   propertyName: 'completed',
   trueFolder: '02 - Completed',
   falseFolder: '01 - Inbox',
@@ -21,8 +21,8 @@ const DEFAULT_SETTINGS: FileMoverPluginSettings = {
 };
 
 // Main plugin class
-export default class FileMoverPlugin extends Plugin {
-  settings: FileMoverPluginSettings = DEFAULT_SETTINGS;
+export default class TaskflowPlugin extends Plugin {
+  settings: TaskflowPluginSettings = DEFAULT_SETTINGS;
 
   /**
    * Called when the plugin is loaded.
@@ -30,7 +30,7 @@ export default class FileMoverPlugin extends Plugin {
   async onload() {
     await this.loadSettings();
 
-    this.addSettingTab(new FileMoverSettingTab(this.app, this));
+    this.addSettingTab(new TaskflowSettingTab(this.app, this));
 
     // ✅ FIX: Use the 'metadataCache.changed' event for instant frontmatter updates.
     // This is more reliable than 'vault.modify'.
@@ -78,7 +78,7 @@ export default class FileMoverPlugin extends Plugin {
       const { propertyName, trueFolder, falseFolder, enableCompletedDate, completedDatePropertyName } = this.settings;
 
       if (!propertyName || !trueFolder || !falseFolder) {
-        console.warn('Obsidian File Mover Plugin: Settings are incomplete.');
+        console.warn('Taskflow Plugin: Settings are incomplete.');
         return;
       }
 
@@ -109,13 +109,13 @@ export default class FileMoverPlugin extends Plugin {
       if (!targetFolderAbstractFile) {
         await this.app.vault.createFolder(targetFolder);
       } else if (targetFolderAbstractFile instanceof TFile) {
-        console.error(`Obsidian File Mover Plugin: Target path "${targetFolder}" is a file, not a folder.`);
+        console.error(`Taskflow Plugin: Target path "${targetFolder}" is a file, not a folder.`);
         return;
       }
 
       // 1. Move the file first.
       await this.app.vault.rename(file, newPath);
-      console.log(`Obsidian File Mover Plugin: Moved "${originalPath}" to "${newPath}"`);
+      console.log(`Taskflow Plugin: Moved "${originalPath}" to "${newPath}"`);
 
       // 2. Then, modify the frontmatter in the new location.
       if (enableCompletedDate && completedDatePropertyName) {
@@ -135,7 +135,7 @@ export default class FileMoverPlugin extends Plugin {
       }
 
     } catch (e) {
-      console.error(`Obsidian File Mover Plugin: Error processing "${originalPath}":`, e);
+      console.error(`Taskflow Plugin: Error processing "${originalPath}":`, e);
     } finally {
       this.processing.delete(originalPath);
     }
@@ -143,10 +143,10 @@ export default class FileMoverPlugin extends Plugin {
 }
 
 // Settings tab class remains the same
-class FileMoverSettingTab extends PluginSettingTab {
-  plugin: FileMoverPlugin;
+class TaskflowSettingTab extends PluginSettingTab {
+  plugin: TaskflowPlugin;
 
-  constructor(app: App, plugin: FileMoverPlugin) {
+  constructor(app: App, plugin: TaskflowPlugin) {
     super(app, plugin);
     this.plugin = plugin;
   }
@@ -155,7 +155,7 @@ class FileMoverSettingTab extends PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
 
-    containerEl.createEl('h2', { text: 'File Mover Settings' });
+    containerEl.createEl('h2', { text: 'Taskflow settings' });
 
     new Setting(containerEl)
       .setName('Checkbox Property Name')
