@@ -425,6 +425,60 @@ export default class TaskflowPlugin extends Plugin {
   }
 
   /**
+   * Creates all configured task and goal folders if they don't already exist.
+   */
+  async bootstrapFolderStructure(): Promise<void> {
+    const foldersToCreate: string[] = [];
+
+    // Task folders
+    const { rootFolder, trueFolder, falseFolder, iceboxFolder, enableBacklog, backlogFolder } = this.settings;
+
+    if (rootFolder) {
+      foldersToCreate.push(rootFolder);
+
+      const taskTrueFolder = buildPath(rootFolder, trueFolder);
+      if (taskTrueFolder) foldersToCreate.push(taskTrueFolder);
+
+      const taskFalseFolder = buildPath(rootFolder, falseFolder);
+      if (taskFalseFolder && taskFalseFolder !== rootFolder) foldersToCreate.push(taskFalseFolder);
+
+      const taskIceboxFolder = buildPath(rootFolder, iceboxFolder);
+      if (taskIceboxFolder) foldersToCreate.push(taskIceboxFolder);
+
+      if (enableBacklog) {
+        const taskBacklogFolder = buildPath(rootFolder, backlogFolder);
+        if (taskBacklogFolder) foldersToCreate.push(taskBacklogFolder);
+      }
+    }
+
+    // Goal folders
+    const { goalRootFolder, goalTrueFolder, goalFalseFolder, goalIceboxFolder, goalBacklogFolder } = this.settings;
+
+    if (goalRootFolder) {
+      foldersToCreate.push(goalRootFolder);
+
+      const gTrueFolder = buildPath(goalRootFolder, goalTrueFolder);
+      if (gTrueFolder) foldersToCreate.push(gTrueFolder);
+
+      const gFalseFolder = buildPath(goalRootFolder, goalFalseFolder);
+      if (gFalseFolder && gFalseFolder !== goalRootFolder) foldersToCreate.push(gFalseFolder);
+
+      const gIceboxFolder = buildPath(goalRootFolder, goalIceboxFolder);
+      if (gIceboxFolder) foldersToCreate.push(gIceboxFolder);
+
+      const gBacklogFolder = buildPath(goalRootFolder, goalBacklogFolder);
+      if (gBacklogFolder) foldersToCreate.push(gBacklogFolder);
+    }
+
+    // Create all folders
+    for (const folder of foldersToCreate) {
+      await this.ensureFolder(folder);
+    }
+
+    new Notice(`Taskflow: Folder structure created. Checked ${foldersToCreate.length} folder(s).`);
+  }
+
+  /**
    * Processes a given Markdown file to determine if it needs to be moved.
    * @param file The TFile object representing the Markdown file.
    */
@@ -1067,6 +1121,18 @@ class TaskflowSettingTab extends PluginSettingTab {
         .onClick(async () => {
           await this.plugin.detectGoalCounter();
           this.display();
+        }));
+
+    containerEl.createEl('h2', { text: 'Folder Setup' });
+
+    new Setting(containerEl)
+      .setName('Bootstrap Folder Structure')
+      .setDesc('Create all configured task and goal folders if they don\'t already exist. This includes root folders, archive, icebox, backlog (if enabled), and uncompleted folders.')
+      .addButton(button => button
+        .setButtonText('Create folder structure')
+        .setTooltip('Create all configured folders')
+        .onClick(async () => {
+          await this.plugin.bootstrapFolderStructure();
         }));
   }
 }
