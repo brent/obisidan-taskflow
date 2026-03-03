@@ -15,11 +15,21 @@ interface TaskflowPluginSettings {
   enableCompletedDate: boolean;
   completedDatePropertyName: string;
   taskCounter: number;
+  goalRootFolder: string;
+  goalTemplatePath: string;
+  goalPropertyName: string;
+  goalTrueFolder: string;
+  goalFalseFolder: string;
+  goalIceboxFolder: string;
+  goalBacklogFolder: string;
+  enableGoalCompletedDate: boolean;
+  goalCompletedDatePropertyName: string;
+  goalCounter: number;
 }
 
 // Define default settings for the plugin
 const DEFAULT_SETTINGS: TaskflowPluginSettings = {
-  rootFolder: 'taskflow',
+  rootFolder: 'tasks',
   templatePath: '',
   propertyName: '✅',
   trueFolder: 'archive',
@@ -30,6 +40,16 @@ const DEFAULT_SETTINGS: TaskflowPluginSettings = {
   enableCompletedDate: false,
   completedDatePropertyName: 'completed_date',
   taskCounter: 1,
+  goalRootFolder: 'goals',
+  goalTemplatePath: '',
+  goalPropertyName: '✅',
+  goalTrueFolder: 'archive',
+  goalFalseFolder: '',
+  goalIceboxFolder: 'icebox',
+  goalBacklogFolder: 'backlog',
+  enableGoalCompletedDate: false,
+  goalCompletedDatePropertyName: 'completed_date',
+  goalCounter: 1,
 };
 
 // Builds an absolute vault path from a root and a relative sub-path.
@@ -48,7 +68,7 @@ export default class TaskflowPlugin extends Plugin {
    * Called when the plugin is loaded.
    */
   async onload() {
-    const needsCounterScan = await this.loadSettings();
+    const { needsTaskScan, needsGoalScan } = await this.loadSettings();
 
     this.addSettingTab(new TaskflowSettingTab(this.app, this));
 
@@ -75,20 +95,40 @@ export default class TaskflowPlugin extends Plugin {
       },
     });
 
+    this.addCommand({
+      id: 'create-goal',
+      name: 'Create goal',
+      callback: () => new CreateGoalModal(this.app, this).open(),
+    });
+
+    this.addCommand({
+      id: 'move-goal-to-icebox',
+      name: 'Move current goal to icebox',
+      callback: () => this.moveGoalToIcebox(),
+    });
+
+    this.addCommand({
+      id: 'move-goal-out-of-backlog',
+      name: 'Move current goal out of backlog',
+      callback: () => this.moveGoalOutOfBacklog(),
+    });
+
     // ✅ FIX: Use the 'metadataCache.changed' event for instant frontmatter updates.
     // This is more reliable than 'vault.modify'.
     this.registerEvent(
       this.app.metadataCache.on('changed', async (file) => {
         // This event gives us the file that changed, which is all we need.
         await this.processFile(file);
+        await this.processGoalFile(file);
       })
     );
 
-    // Scan for the highest existing task number on first install or when
-    // upgrading from a version that didn't persist the counter.
-    if (needsCounterScan) {
-      this.app.workspace.onLayoutReady(() => this.detectTaskCounter());
-    }
+    // Scan for the highest existing task/goal numbers on first install or when
+    // upgrading from a version that didn't persist the counters.
+    this.app.workspace.onLayoutReady(() => {
+      if (needsTaskScan) this.detectTaskCounter();
+      if (needsGoalScan) this.detectGoalCounter();
+    });
   }
 
   /**
@@ -98,13 +138,15 @@ export default class TaskflowPlugin extends Plugin {
 
   /**
    * Loads settings from Obsidian's data storage.
-   * Returns true if taskCounter was absent (fresh install or legacy data),
-   * indicating that detectTaskCounter() should be run.
+   * Returns which counters were absent (fresh install or legacy data).
    */
-  async loadSettings(): Promise<boolean> {
+  async loadSettings(): Promise<{ needsTaskScan: boolean; needsGoalScan: boolean }> {
     const savedData = await this.loadData();
     this.settings = Object.assign({}, DEFAULT_SETTINGS, savedData);
-    return !savedData || !('taskCounter' in savedData);
+    return {
+      needsTaskScan: !savedData || !('taskCounter' in savedData),
+      needsGoalScan: !savedData || !('goalCounter' in savedData),
+    };
   }
 
   /**
@@ -133,6 +175,28 @@ export default class TaskflowPlugin extends Plugin {
     }
 
     this.settings.taskCounter = maxNum + 1;
+    await this.saveSettings();
+  }
+
+  /**
+   * Scans the goal root folder for existing goal files and sets goalCounter to
+   * one above the highest GOAL number found. Falls back to 1 if none exist.
+   */
+  async detectGoalCounter(): Promise<void> {
+    const { goalRootFolder } = this.settings;
+    const files = this.app.vault.getMarkdownFiles();
+    let maxNum = 0;
+
+    for (const file of files) {
+      if (goalRootFolder && !file.path.startsWith(`${goalRootFolder}/`)) continue;
+      const match = file.name.match(/^\[GOAL-(\d+)\]/);
+      if (match) {
+        const num = parseInt(match[1]!, 10);
+        if (num > maxNum) maxNum = num;
+      }
+    }
+
+    this.settings.goalCounter = maxNum + 1;
     await this.saveSettings();
   }
 
@@ -185,6 +249,66 @@ export default class TaskflowPlugin extends Plugin {
 
     if (currentFolder === targetFolder) {
       new Notice('Taskflow: File is already in the root folder.');
+      return;
+    }
+
+    const newPath = targetFolder
+      ? `${targetFolder}/${activeFile.name}`
+      : activeFile.name;
+    await this.ensureFolder(targetFolder);
+    await this.app.vault.rename(activeFile, newPath);
+    new Notice('Taskflow: Moved out of backlog.');
+  }
+
+  /**
+   * Moves the currently active goal file to the configured goal icebox folder.
+   */
+  async moveGoalToIcebox() {
+    const activeFile = this.app.workspace.getActiveFile();
+    if (!activeFile) return;
+
+    if (!activeFile.name.startsWith('[GOAL-')) {
+      new Notice('Taskflow: Active file is not a goal file.');
+      return;
+    }
+
+    const { goalRootFolder, goalIceboxFolder } = this.settings;
+    const absoluteIcebox = buildPath(goalRootFolder, goalIceboxFolder);
+    if (!absoluteIcebox) {
+      new Notice('Taskflow: Goal icebox folder is not configured.');
+      return;
+    }
+
+    const currentFolder = activeFile.parent?.path || '';
+    if (currentFolder === absoluteIcebox) {
+      new Notice('Taskflow: File is already in the icebox.');
+      return;
+    }
+
+    const newPath = `${absoluteIcebox}/${activeFile.name}`;
+    await this.ensureFolder(absoluteIcebox);
+    await this.app.vault.rename(activeFile, newPath);
+    new Notice('Taskflow: Moved to icebox.');
+  }
+
+  /**
+   * Moves the currently active goal file from the backlog to the goal root folder.
+   */
+  async moveGoalOutOfBacklog() {
+    const activeFile = this.app.workspace.getActiveFile();
+    if (!activeFile) return;
+
+    if (!activeFile.name.startsWith('[GOAL-')) {
+      new Notice('Taskflow: Active file is not a goal file.');
+      return;
+    }
+
+    const { goalRootFolder } = this.settings;
+    const targetFolder = goalRootFolder || '';
+    const currentFolder = activeFile.parent?.path || '';
+
+    if (currentFolder === targetFolder) {
+      new Notice('Taskflow: File is already in the goal root folder.');
       return;
     }
 
@@ -293,6 +417,87 @@ export default class TaskflowPlugin extends Plugin {
       this.processing.delete(originalPath);
     }
   }
+
+  /**
+   * Processes a given Markdown file to determine if it needs to be moved (goal workflow).
+   * @param file The TFile object representing the Markdown file.
+   */
+  async processGoalFile(file: TFile) {
+    const originalPath = file.path;
+    if (this.processing.has(originalPath)) {
+      return;
+    }
+
+    this.processing.add(originalPath);
+
+    try {
+      const { goalRootFolder, goalPropertyName, goalTrueFolder, goalFalseFolder, enableGoalCompletedDate, goalCompletedDatePropertyName } = this.settings;
+
+      // If a goal root folder is configured, only process files inside it.
+      if (goalRootFolder && !file.path.startsWith(`${goalRootFolder}/`)) {
+        return;
+      }
+
+      const absoluteTrueFolder = buildPath(goalRootFolder, goalTrueFolder);
+      const absoluteFalseFolder = buildPath(goalRootFolder, goalFalseFolder);
+
+      if (!goalPropertyName || !absoluteTrueFolder || !absoluteFalseFolder) {
+        console.warn('Taskflow Plugin: Goal settings are incomplete.');
+        return;
+      }
+
+      const fileCache = this.app.metadataCache.getFileCache(file);
+      if (!fileCache || !fileCache.frontmatter) {
+        return; // No frontmatter, so nothing to do.
+      }
+
+      const propertyValue = fileCache.frontmatter[goalPropertyName];
+      let targetFolder = '';
+
+      if (propertyValue === true) {
+        targetFolder = absoluteTrueFolder;
+      } else if (propertyValue === false) {
+        targetFolder = absoluteFalseFolder;
+      } else {
+        return; // Property not found or not a boolean.
+      }
+
+      const currentFolderPath = file.parent?.path || '';
+      if (currentFolderPath === targetFolder) {
+        return; // Already in the correct folder.
+      }
+
+      const newPath = `${targetFolder}/${file.name}`;
+
+      await this.ensureFolder(targetFolder);
+
+      // 1. Move the file first.
+      await this.app.vault.rename(file, newPath);
+      console.log(`Taskflow Plugin: Moved "${originalPath}" to "${newPath}"`);
+
+      // 2. Then, modify the frontmatter in the new location.
+      if (enableGoalCompletedDate && goalCompletedDatePropertyName) {
+        if (propertyValue === true) {
+          await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
+            if (!frontmatter[goalCompletedDatePropertyName]) {
+              const now = new Date();
+              const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+              frontmatter[goalCompletedDatePropertyName] = formatInTimeZone(now, timeZone, "yyyy-MM-dd'T'HH:mm:ssXXX");
+            }
+          });
+        } else if (propertyValue === false) {
+          await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
+            delete frontmatter[goalCompletedDatePropertyName];
+          });
+        }
+      }
+
+    } catch (e) {
+      console.error(`Taskflow Plugin: Error processing "${originalPath}":`, e);
+    } finally {
+      this.processing.delete(originalPath);
+    }
+  }
 }
 
 class CreateTaskModal extends Modal {
@@ -347,8 +552,9 @@ class CreateTaskModal extends Modal {
         `${propertyName}: false`,
         '🚩: false',
         'due: ',
-        'defer: ',
+        'deferred: ',
         'started: ',
+        'parent: ',
         '---',
         '',
       ].join('\n');
@@ -374,6 +580,85 @@ class CreateTaskModal extends Modal {
   }
 }
 
+class CreateGoalModal extends Modal {
+  plugin: TaskflowPlugin;
+
+  constructor(app: App, plugin: TaskflowPlugin) {
+    super(app);
+    this.plugin = plugin;
+  }
+
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.createEl('h2', { text: 'New goal' });
+
+    const input = contentEl.createEl('input', { type: 'text' });
+    input.placeholder = 'Goal title';
+    input.style.width = '100%';
+    input.style.marginBottom = '1em';
+
+    input.addEventListener('keydown', async (e) => {
+      if (e.key === 'Enter') await this.createGoal(input.value);
+    });
+
+    const button = contentEl.createEl('button', { text: 'Create' });
+    button.addEventListener('click', async () => await this.createGoal(input.value));
+
+    // Focus the input after the modal finishes animating open.
+    setTimeout(() => input.focus(), 50);
+  }
+
+  async createGoal(title: string) {
+    title = title.trim();
+    if (!title) return;
+
+    const { goalRootFolder, goalCounter, goalPropertyName, goalTemplatePath, goalBacklogFolder } = this.plugin.settings;
+    const paddedNum = String(goalCounter).padStart(3, '0');
+    const fileName = `[GOAL-${paddedNum}] ${title}.md`;
+    // Goals always go to backlog folder
+    const targetFolder = buildPath(goalRootFolder, goalBacklogFolder);
+    const filePath = targetFolder ? `${targetFolder}/${fileName}` : fileName;
+
+    let content: string;
+    const templateFile = goalTemplatePath
+      ? this.app.vault.getAbstractFileByPath(goalTemplatePath)
+      : null;
+    if (templateFile instanceof TFile) {
+      content = await this.app.vault.read(templateFile);
+    } else {
+      content = [
+        '---',
+        `${goalPropertyName}: false`,
+        '🚩: false',
+        'due: ',
+        'deferred: ',
+        'started: ',
+        'parent: ',
+        '---',
+        '',
+      ].join('\n');
+    }
+
+    await this.plugin.ensureFolder(targetFolder);
+
+    // Suppress processGoalFile from reacting to the newly created file.
+    this.plugin.processing.add(filePath);
+    const file = await this.app.vault.create(filePath, content);
+    setTimeout(() => this.plugin.processing.delete(filePath), 500);
+
+    // Increment and persist the counter.
+    this.plugin.settings.goalCounter = goalCounter + 1;
+    await this.plugin.saveSettings();
+
+    this.close();
+    await this.app.workspace.getLeaf(false).openFile(file);
+  }
+
+  onClose() {
+    this.contentEl.empty();
+  }
+}
+
 // Settings tab class remains the same
 class TaskflowSettingTab extends PluginSettingTab {
   plugin: TaskflowPlugin;
@@ -388,6 +673,8 @@ class TaskflowSettingTab extends PluginSettingTab {
     containerEl.empty();
 
     containerEl.createEl('h2', { text: 'Taskflow settings' });
+
+    containerEl.createEl('h2', { text: 'Task Settings' });
 
     new Setting(containerEl)
       .setName('Root Folder')
@@ -527,6 +814,134 @@ class TaskflowSettingTab extends PluginSettingTab {
         .setTooltip('Scan root folder for existing task files and set counter accordingly')
         .onClick(async () => {
           await this.plugin.detectTaskCounter();
+          this.display();
+        }));
+
+    containerEl.createEl('h2', { text: 'Goal Settings' });
+
+    new Setting(containerEl)
+      .setName('Goal Root Folder')
+      .setDesc('Scope goal files to this folder. The goal sub-folders below are relative to this root. Leave empty to watch the entire vault.')
+      .addText(text => text
+        .setPlaceholder('goals')
+        .setValue(this.plugin.settings.goalRootFolder)
+        .onChange(async (value) => {
+          this.plugin.settings.goalRootFolder = value;
+          await this.plugin.saveSettings();
+          await this.plugin.detectGoalCounter();
+        }));
+
+    new Setting(containerEl)
+      .setName('Goal Template')
+      .setDesc('Path to a template file used when creating goals. Falls back to the default frontmatter if the file does not exist.')
+      .addText(text => text
+        .setPlaceholder('templates/goal.md')
+        .setValue(this.plugin.settings.goalTemplatePath)
+        .onChange(async (value) => {
+          this.plugin.settings.goalTemplatePath = value;
+          await this.plugin.saveSettings();
+        }));
+
+    new Setting(containerEl)
+      .setName('Goal Property Name')
+      .setDesc('The name of the frontmatter property that will trigger the goal file move.')
+      .addText(text => text
+        .setPlaceholder('✅')
+        .setValue(this.plugin.settings.goalPropertyName)
+        .onChange(async (value) => {
+          this.plugin.settings.goalPropertyName = value;
+          await this.plugin.saveSettings();
+        }));
+
+    new Setting(containerEl)
+      .setName('Goal Folder for "True" value')
+      .setDesc('Where goals are moved when the property is set to `true`. Relative to Goal Root Folder if one is set.')
+      .addText(text => text
+        .setPlaceholder('archive')
+        .setValue(this.plugin.settings.goalTrueFolder)
+        .onChange(async (value) => {
+          this.plugin.settings.goalTrueFolder = value;
+          await this.plugin.saveSettings();
+        }));
+
+    new Setting(containerEl)
+      .setName('Goal Folder for "False" value')
+      .setDesc('Where goals are moved when the property is set to `false`. Relative to Goal Root Folder if one is set. Leave blank to use the Goal Root Folder itself.')
+      .addText(text => text
+        .setPlaceholder('Leave blank to use Goal Root Folder')
+        .setValue(this.plugin.settings.goalFalseFolder)
+        .onChange(async (value) => {
+          this.plugin.settings.goalFalseFolder = value;
+          await this.plugin.saveSettings();
+        }));
+
+    new Setting(containerEl)
+      .setName('Goal Icebox Folder')
+      .setDesc('Goals moved to the icebox are placed here. Relative to Goal Root Folder if one is set. Leave blank to use the Goal Root Folder itself.')
+      .addText(text => text
+        .setPlaceholder('icebox')
+        .setValue(this.plugin.settings.goalIceboxFolder)
+        .onChange(async (value) => {
+          this.plugin.settings.goalIceboxFolder = value;
+          await this.plugin.saveSettings();
+        }));
+
+    new Setting(containerEl)
+      .setName('Goal Backlog Folder')
+      .setDesc('New goals are created here. Relative to Goal Root Folder if one is set.')
+      .addText(text => text
+        .setPlaceholder('backlog')
+        .setValue(this.plugin.settings.goalBacklogFolder)
+        .onChange(async (value) => {
+          this.plugin.settings.goalBacklogFolder = value;
+          await this.plugin.saveSettings();
+        }));
+
+    containerEl.createEl('h3', { text: 'Goal Completed Date Settings' });
+
+    new Setting(containerEl)
+      .setName('Enable Goal Completed Date')
+      .setDesc('When a goal property is checked, add a completed date property.')
+      .addToggle(toggle => toggle
+        .setValue(this.plugin.settings.enableGoalCompletedDate)
+        .onChange(async (value) => {
+          this.plugin.settings.enableGoalCompletedDate = value;
+          await this.plugin.saveSettings();
+          this.display();
+        }));
+
+    if (this.plugin.settings.enableGoalCompletedDate) {
+      new Setting(containerEl)
+        .setName('Goal Completed Date Property Name')
+        .setDesc('The name of the frontmatter property to store the goal completed date.')
+        .addText(text => text
+          .setPlaceholder('completed_date')
+          .setValue(this.plugin.settings.goalCompletedDatePropertyName)
+          .onChange(async (value) => {
+            this.plugin.settings.goalCompletedDatePropertyName = value;
+            await this.plugin.saveSettings();
+          }));
+    }
+
+    containerEl.createEl('h3', { text: 'Goal Counter' });
+
+    new Setting(containerEl)
+      .setName('Next goal number')
+      .setDesc('The number used for the next created goal. Edit manually or rescan to set it from existing files.')
+      .addText(text => text
+        .setValue(String(this.plugin.settings.goalCounter))
+        .onChange(async (value) => {
+          const num = parseInt(value, 10);
+          if (!isNaN(num) && num > 0) {
+            this.plugin.settings.goalCounter = num;
+            await this.plugin.saveSettings();
+          }
+        }))
+      .addButton(button => button
+        .setButtonText('Rescan')
+        .setTooltip('Scan goal root folder for existing goal files and set counter accordingly')
+        .onClick(async () => {
+          await this.plugin.detectGoalCounter();
           this.display();
         }));
   }
