@@ -526,7 +526,7 @@ export default class TaskflowPlugin extends Plugin {
       }
 
       const currentFolderPath = file.parent?.path || '';
-      if (currentFolderPath === targetFolder || currentFolderPath.startsWith(`${targetFolder}/`)) {
+      if (currentFolderPath === targetFolder) {
         return; // Already in the correct folder.
       }
 
@@ -647,7 +647,7 @@ export default class TaskflowPlugin extends Plugin {
       }
 
       const currentFolderPath = file.parent?.path || '';
-      if (currentFolderPath === targetFolder || currentFolderPath.startsWith(`${targetFolder}/`)) {
+      if (currentFolderPath === targetFolder) {
         return; // Already in the correct folder.
       }
 
