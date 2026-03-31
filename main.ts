@@ -28,6 +28,8 @@ interface TaskflowPluginSettings {
   goalCompletedDatePropertyName: string;
   goalCounter: number;
   childTaskCompletionBehavior: 'ask' | 'always' | 'never';
+  enableTaskRoutingDialog: boolean;
+  enableGoalRoutingDialog: boolean;
 }
 
 // Define default settings for the plugin
@@ -56,6 +58,8 @@ const DEFAULT_SETTINGS: TaskflowPluginSettings = {
   goalCompletedDatePropertyName: 'completed_date',
   goalCounter: 1,
   childTaskCompletionBehavior: 'ask',
+  enableTaskRoutingDialog: false,
+  enableGoalRoutingDialog: false,
 };
 
 // Builds an absolute vault path from a root and a relative sub-path.
@@ -718,25 +722,45 @@ class CreateTaskModal extends Modal {
     input.style.width = '100%';
     input.style.marginBottom = '1em';
 
+    const { enableBacklog, enableTaskRoutingDialog } = this.plugin.settings;
+    let routeToBacklog = enableBacklog;
+    let routeSelect: HTMLSelectElement | null = null;
+    if (enableBacklog && enableTaskRoutingDialog) {
+      const routeRow = contentEl.createDiv({ cls: 'taskflow-route-row' });
+      routeRow.style.marginBottom = '1em';
+      routeRow.createEl('label', { text: 'Route to: ' }).style.marginRight = '0.5em';
+      routeSelect = routeRow.createEl('select');
+      routeSelect.style.cssText = 'appearance: auto; -webkit-appearance: auto; padding: 2px 4px; border: 1px solid var(--background-modifier-border); border-radius: 4px; background: var(--background-primary); color: var(--text-normal); cursor: pointer;';
+      routeSelect.createEl('option', { text: 'Backlog', value: 'backlog' });
+      routeSelect.createEl('option', { text: 'Active', value: 'active' });
+    }
+
     input.addEventListener('keydown', async (e) => {
-      if (e.key === 'Enter') await this.createTask(input.value);
+      if (e.key === 'Enter') {
+        if (routeSelect) routeToBacklog = routeSelect.value === 'backlog';
+        await this.createTask(input.value, routeToBacklog);
+      }
     });
 
     const button = contentEl.createEl('button', { text: 'Create' });
-    button.addEventListener('click', async () => await this.createTask(input.value));
+    button.addEventListener('click', async () => {
+      if (routeSelect) routeToBacklog = routeSelect.value === 'backlog';
+      await this.createTask(input.value, routeToBacklog);
+    });
 
     // Focus the input after the modal finishes animating open.
     setTimeout(() => input.focus(), 50);
   }
 
-  async createTask(title: string) {
+  async createTask(title: string, useBacklog: boolean) {
     title = title.trim();
     if (!title) return;
 
-    const { rootFolder, taskLabel, taskCounter, propertyName, templatePath, enableBacklog, backlogFolder } = this.plugin.settings;
+    const { rootFolder, taskLabel, taskCounter, propertyName, templatePath,
+            backlogFolder } = this.plugin.settings;
     const paddedNum = String(taskCounter).padStart(3, '0');
     const fileName = `[${taskLabel}-${paddedNum}] ${title}.md`;
-    const targetFolder = enableBacklog
+    const targetFolder = useBacklog
       ? buildPath(rootFolder, backlogFolder)
       : (rootFolder || '');
     const filePath = targetFolder ? `${targetFolder}/${fileName}` : fileName;
@@ -798,26 +822,47 @@ class CreateGoalModal extends Modal {
     input.style.width = '100%';
     input.style.marginBottom = '1em';
 
+    const { enableGoalRoutingDialog } = this.plugin.settings;
+    let routeToBacklog = true;
+    let routeSelect: HTMLSelectElement | null = null;
+    if (enableGoalRoutingDialog) {
+      const routeRow = contentEl.createDiv({ cls: 'taskflow-route-row' });
+      routeRow.style.marginBottom = '1em';
+      routeRow.createEl('label', { text: 'Save to: ' }).style.marginRight = '0.5em';
+      routeSelect = routeRow.createEl('select');
+      routeSelect.style.cssText = 'appearance: auto; -webkit-appearance: auto; padding: 2px 4px; border: 1px solid var(--background-modifier-border); border-radius: 4px; background: var(--background-primary); color: var(--text-normal); cursor: pointer;';
+      routeSelect.createEl('option', { text: 'Backlog', value: 'backlog' });
+      routeSelect.createEl('option', { text: 'Active', value: 'active' });
+    }
+
     input.addEventListener('keydown', async (e) => {
-      if (e.key === 'Enter') await this.createGoal(input.value);
+      if (e.key === 'Enter') {
+        if (routeSelect) routeToBacklog = routeSelect.value === 'backlog';
+        await this.createGoal(input.value, routeToBacklog);
+      }
     });
 
     const button = contentEl.createEl('button', { text: 'Create' });
-    button.addEventListener('click', async () => await this.createGoal(input.value));
+    button.addEventListener('click', async () => {
+      if (routeSelect) routeToBacklog = routeSelect.value === 'backlog';
+      await this.createGoal(input.value, routeToBacklog);
+    });
 
     // Focus the input after the modal finishes animating open.
     setTimeout(() => input.focus(), 50);
   }
 
-  async createGoal(title: string) {
+  async createGoal(title: string, useBacklog: boolean) {
     title = title.trim();
     if (!title) return;
 
-    const { goalRootFolder, goalLabel, goalCounter, goalPropertyName, goalTemplatePath, goalBacklogFolder } = this.plugin.settings;
+    const { goalRootFolder, goalLabel, goalCounter, goalPropertyName, goalTemplatePath,
+            goalBacklogFolder } = this.plugin.settings;
     const paddedNum = String(goalCounter).padStart(3, '0');
     const fileName = `[${goalLabel}-${paddedNum}] ${title}.md`;
-    // Goals always go to backlog folder
-    const targetFolder = buildPath(goalRootFolder, goalBacklogFolder);
+    const targetFolder = useBacklog
+      ? buildPath(goalRootFolder, goalBacklogFolder)
+      : (goalRootFolder || '');
     const filePath = targetFolder ? `${targetFolder}/${fileName}` : fileName;
 
     let content: string;
@@ -1025,6 +1070,16 @@ class TaskflowSettingTab extends PluginSettingTab {
             this.plugin.settings.backlogFolder = value;
             await this.plugin.saveSettings();
           }));
+
+      new Setting(containerEl)
+        .setName('Show routing dialog')
+        .setDesc('When creating a task, ask whether to send it to the backlog or active folder.')
+        .addToggle(toggle => toggle
+          .setValue(this.plugin.settings.enableTaskRoutingDialog)
+          .onChange(async (value) => {
+            this.plugin.settings.enableTaskRoutingDialog = value;
+            await this.plugin.saveSettings();
+          }));
     }
 
     containerEl.createEl('h3', { text: 'Completed Date Settings' });
@@ -1170,6 +1225,16 @@ class TaskflowSettingTab extends PluginSettingTab {
         .setValue(this.plugin.settings.goalBacklogFolder)
         .onChange(async (value) => {
           this.plugin.settings.goalBacklogFolder = value;
+          await this.plugin.saveSettings();
+        }));
+
+    new Setting(containerEl)
+      .setName('Show routing dialog')
+      .setDesc('When creating a goal, ask whether to send it to the backlog or active folder.')
+      .addToggle(toggle => toggle
+        .setValue(this.plugin.settings.enableGoalRoutingDialog)
+        .onChange(async (value) => {
+          this.plugin.settings.enableGoalRoutingDialog = value;
           await this.plugin.saveSettings();
         }));
 
