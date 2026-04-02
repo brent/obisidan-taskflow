@@ -635,6 +635,7 @@ export default class TaskflowPlugin extends Plugin {
     }
 
     this.processing.add(originalPath);
+    let newPath = '';
 
     try {
       const { goalRootFolder, goalPropertyName, goalTrueFolder, goalFalseFolder, enableGoalCompletedDate, goalCompletedDatePropertyName } = this.settings;
@@ -668,7 +669,8 @@ export default class TaskflowPlugin extends Plugin {
 
       const currentFolderPath = file.parent?.path || '';
       if (targetFolder && currentFolderPath !== targetFolder) {
-        const newPath = `${targetFolder}/${file.name}`;
+        newPath = `${targetFolder}/${file.name}`;
+        this.processing.add(newPath);
 
         await this.ensureFolder(targetFolder);
 
@@ -737,6 +739,7 @@ export default class TaskflowPlugin extends Plugin {
       console.error(`Taskflow Plugin: Error processing "${originalPath}":`, e);
     } finally {
       this.processing.delete(originalPath);
+      if (newPath) this.processing.delete(newPath);
     }
   }
 }
