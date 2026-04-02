@@ -28,6 +28,7 @@ interface TaskflowPluginSettings {
   goalCompletedDatePropertyName: string;
   goalCounter: number;
   childTaskCompletionBehavior: 'ask' | 'always' | 'never';
+  childTaskFlagBehavior: 'ask' | 'always' | 'never';
   enableTaskRoutingDialog: boolean;
   enableGoalRoutingDialog: boolean;
 }
@@ -58,6 +59,7 @@ const DEFAULT_SETTINGS: TaskflowPluginSettings = {
   goalCompletedDatePropertyName: 'completed_date',
   goalCounter: 1,
   childTaskCompletionBehavior: 'ask',
+  childTaskFlagBehavior: 'ask',
   enableTaskRoutingDialog: false,
   enableGoalRoutingDialog: false,
 };
@@ -606,6 +608,22 @@ export default class TaskflowPlugin extends Plugin {
     });
   }
 
+  async flagChildTasks(children: TFile[]): Promise<void> {
+    for (const child of children) {
+      await this.app.fileManager.processFrontMatter(child, (frontmatter) => {
+        frontmatter['🚩'] = true;
+      });
+    }
+  }
+
+  askFlagChildren(childCount: number): Promise<boolean> {
+    return new Promise((resolve) => {
+      let resolved = false;
+      const safeResolve = (val: boolean) => { if (!resolved) { resolved = true; resolve(val); } };
+      new FlagChildTasksModal(this.app, childCount, safeResolve).open();
+    });
+  }
+
   /**
    * Processes a given Markdown file to determine if it needs to be moved (goal workflow).
    * @param file The TFile object representing the Markdown file.
@@ -646,37 +664,33 @@ export default class TaskflowPlugin extends Plugin {
         targetFolder = absoluteTrueFolder;
       } else if (propertyValue === false) {
         targetFolder = absoluteFalseFolder;
-      } else {
-        return; // Property not found or not a boolean.
       }
 
       const currentFolderPath = file.parent?.path || '';
-      if (currentFolderPath === targetFolder) {
-        return; // Already in the correct folder.
-      }
+      if (targetFolder && currentFolderPath !== targetFolder) {
+        const newPath = `${targetFolder}/${file.name}`;
 
-      const newPath = `${targetFolder}/${file.name}`;
+        await this.ensureFolder(targetFolder);
 
-      await this.ensureFolder(targetFolder);
+        // 1. Move the file first.
+        await this.app.vault.rename(file, newPath);
+        console.log(`Taskflow Plugin: Moved "${originalPath}" to "${newPath}"`);
 
-      // 1. Move the file first.
-      await this.app.vault.rename(file, newPath);
-      console.log(`Taskflow Plugin: Moved "${originalPath}" to "${newPath}"`);
-
-      // 2. Then, modify the frontmatter in the new location.
-      if (enableGoalCompletedDate && goalCompletedDatePropertyName) {
-        if (propertyValue === true) {
-          await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
-            if (!frontmatter[goalCompletedDatePropertyName]) {
-              const now = new Date();
-              const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-              frontmatter[goalCompletedDatePropertyName] = formatInTimeZone(now, timeZone, "yyyy-MM-dd");
-            }
-          });
-        } else if (propertyValue === false) {
-          await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
-            delete frontmatter[goalCompletedDatePropertyName];
-          });
+        // 2. Then, modify the frontmatter in the new location.
+        if (enableGoalCompletedDate && goalCompletedDatePropertyName) {
+          if (propertyValue === true) {
+            await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
+              if (!frontmatter[goalCompletedDatePropertyName]) {
+                const now = new Date();
+                const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+                frontmatter[goalCompletedDatePropertyName] = formatInTimeZone(now, timeZone, "yyyy-MM-dd'T'HH:mm:ssXXX");
+              }
+            });
+          } else if (propertyValue === false) {
+            await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
+              delete frontmatter[goalCompletedDatePropertyName];
+            });
+          }
         }
       }
 
@@ -692,6 +706,28 @@ export default class TaskflowPlugin extends Plugin {
             }
             if (shouldComplete) {
               await this.completeChildTasks(children);
+            }
+          }
+        }
+      }
+
+      // Handle child task flag cascade when goal is flagged
+      const flagValue = fileCache.frontmatter['🚩'];
+      if (flagValue === true) {
+        const behavior = this.settings.childTaskFlagBehavior;
+        if (behavior !== 'never') {
+          const children = this.findChildTasks(file);
+          const unflaggedChildren = children.filter(child => {
+            const cache = this.app.metadataCache.getFileCache(child);
+            return cache?.frontmatter?.['🚩'] !== true;
+          });
+          if (unflaggedChildren.length > 0) {
+            let shouldFlag = behavior === 'always';
+            if (behavior === 'ask') {
+              shouldFlag = await this.askFlagChildren(unflaggedChildren.length);
+            }
+            if (shouldFlag) {
+              await this.flagChildTasks(unflaggedChildren);
             }
           }
         }
@@ -940,6 +976,44 @@ class CompleteChildTasksModal extends Modal {
   onClose() {
     this.contentEl.empty();
     // If closed via escape/click-outside, treat as "no"
+    this.resolvePromise(false);
+  }
+}
+
+class FlagChildTasksModal extends Modal {
+  private resolvePromise: (value: boolean) => void;
+  private childCount: number;
+
+  constructor(app: App, childCount: number, resolvePromise: (value: boolean) => void) {
+    super(app);
+    this.childCount = childCount;
+    this.resolvePromise = resolvePromise;
+  }
+
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.createEl('h2', { text: 'Flag child tasks?' });
+    contentEl.createEl('p', {
+      text: `This goal has ${this.childCount} unflagged child task(s). Flag them too?`
+    });
+
+    const buttonContainer = contentEl.createDiv({ cls: 'modal-button-container' });
+
+    const yesBtn = buttonContainer.createEl('button', { text: 'Yes, flag them', cls: 'mod-cta' });
+    yesBtn.addEventListener('click', () => {
+      this.resolvePromise(true);
+      this.close();
+    });
+
+    const noBtn = buttonContainer.createEl('button', { text: 'No, leave them' });
+    noBtn.addEventListener('click', () => {
+      this.resolvePromise(false);
+      this.close();
+    });
+  }
+
+  onClose() {
+    this.contentEl.empty();
     this.resolvePromise(false);
   }
 }
@@ -1238,7 +1312,7 @@ class TaskflowSettingTab extends PluginSettingTab {
           await this.plugin.saveSettings();
         }));
 
-    containerEl.createEl('h3', { text: 'Child Task Completion' });
+    containerEl.createEl('h3', { text: 'Child Task Behavior' });
 
     new Setting(containerEl)
       .setName('When a goal is completed')
@@ -1250,6 +1324,19 @@ class TaskflowSettingTab extends PluginSettingTab {
         .setValue(this.plugin.settings.childTaskCompletionBehavior)
         .onChange(async (value: string) => {
           this.plugin.settings.childTaskCompletionBehavior = value as 'ask' | 'always' | 'never';
+          await this.plugin.saveSettings();
+        }));
+
+    new Setting(containerEl)
+      .setName('When a goal is flagged')
+      .setDesc('Controls whether child tasks are automatically flagged when the goal is flagged.')
+      .addDropdown(dropdown => dropdown
+        .addOption('ask', 'Ask me each time')
+        .addOption('always', 'Always flag child tasks')
+        .addOption('never', 'Never flag child tasks')
+        .setValue(this.plugin.settings.childTaskFlagBehavior)
+        .onChange(async (value: string) => {
+          this.plugin.settings.childTaskFlagBehavior = value as 'ask' | 'always' | 'never';
           await this.plugin.saveSettings();
         }));
 
