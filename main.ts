@@ -669,18 +669,19 @@ export default class TaskflowPlugin extends Plugin {
         return; // No frontmatter, so nothing to do.
       }
 
+      const currentFolderPath = file.parent?.path || '';
       const propertyValue = fileCache.frontmatter[propertyName];
       let targetFolder = '';
 
       if (propertyValue === true) {
         targetFolder = absoluteTrueFolder;
       } else if (propertyValue === false) {
+        if (currentFolderPath === absoluteTrueFolder) return; // archived manually, don't evict
         targetFolder = absoluteFalseFolder;
       } else {
         return; // Property not found or not a boolean.
       }
 
-      const currentFolderPath = file.parent?.path || '';
       if (currentFolderPath === targetFolder) {
         return; // Already in the correct folder.
       }
@@ -807,16 +808,17 @@ export default class TaskflowPlugin extends Plugin {
         return; // No frontmatter, so nothing to do.
       }
 
+      const currentFolderPath = file.parent?.path || '';
       const propertyValue = fileCache.frontmatter[goalPropertyName];
       let targetFolder = '';
 
       if (propertyValue === true) {
         targetFolder = absoluteTrueFolder;
       } else if (propertyValue === false) {
+        if (currentFolderPath === absoluteTrueFolder) return; // archived manually, don't evict
         targetFolder = absoluteFalseFolder;
       }
 
-      const currentFolderPath = file.parent?.path || '';
       if (targetFolder && currentFolderPath !== targetFolder) {
         newPath = `${targetFolder}/${file.name}`;
         this.processing.add(newPath);
