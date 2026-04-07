@@ -93,7 +93,7 @@ export default class TaskflowPlugin extends Plugin {
     this.addCommand({
       id: 'move-to-icebox',
       name: 'Icebox task',
-      callback: () => this.moveToIcebox(),
+      callback: () => this.moveTaskToIcebox(),
     });
 
     this.addCommand({
@@ -102,7 +102,7 @@ export default class TaskflowPlugin extends Plugin {
       checkCallback: (checking) => {
         if (!this.settings.enableBacklog) return false;
         if (checking) return true;
-        this.moveOutOfBacklog();
+        this.moveTaskOutOfBacklog();
         return true;
       },
     });
@@ -113,7 +113,7 @@ export default class TaskflowPlugin extends Plugin {
       checkCallback: (checking) => {
         if (!this.settings.enableBacklog) return false;
         if (checking) return true;
-        this.moveToBacklog();
+        this.moveTaskToBacklog();
         return true;
       },
     });
@@ -159,7 +159,7 @@ export default class TaskflowPlugin extends Plugin {
     this.registerEvent(
       this.app.metadataCache.on('changed', async (file) => {
         // This event gives us the file that changed, which is all we need.
-        await this.processFile(file);
+        await this.processTaskFile(file);
         await this.processGoalFile(file);
       })
     );
@@ -169,6 +169,7 @@ export default class TaskflowPlugin extends Plugin {
     this.app.workspace.onLayoutReady(() => {
       if (needsTaskScan) this.detectTaskCounter();
       if (needsGoalScan) this.detectGoalCounter();
+      this.initDoneTracking();
     });
   }
 
@@ -197,372 +198,182 @@ export default class TaskflowPlugin extends Plugin {
     await this.saveData(this.settings);
   }
 
-  /**
-   * Scans the root folder for existing task files and sets taskCounter to
-   * one above the highest TASK number found. Falls back to 1 if none exist.
-   */
+  private async detectCounter(rootFolder: string, label: string, setter: (n: number) => void): Promise<void> {
+    const files = this.app.vault.getMarkdownFiles();
+    let maxNum = 0;
+    const pattern = new RegExp(`^\\[${label}-(\\d+)\\]`);
+    for (const file of files) {
+      if (rootFolder && !file.path.startsWith(`${rootFolder}/`)) continue;
+      const match = file.name.match(pattern);
+      if (match) {
+        const num = parseInt(match[1]!, 10);
+        if (num > maxNum) maxNum = num;
+      }
+    }
+    setter(maxNum + 1);
+    await this.saveSettings();
+  }
+
   async detectTaskCounter(): Promise<void> {
-    const { rootFolder, taskLabel } = this.settings;
-    const files = this.app.vault.getMarkdownFiles();
-    let maxNum = 0;
-    const pattern = new RegExp(`^\\[${taskLabel}-(\\d+)\\]`);
-
-    for (const file of files) {
-      if (rootFolder && !file.path.startsWith(`${rootFolder}/`)) continue;
-      const match = file.name.match(pattern);
-      if (match) {
-        const num = parseInt(match[1]!, 10);
-        if (num > maxNum) maxNum = num;
-      }
-    }
-
-    this.settings.taskCounter = maxNum + 1;
-    await this.saveSettings();
+    await this.detectCounter(this.settings.rootFolder, this.settings.taskLabel, n => { this.settings.taskCounter = n; });
   }
 
-  /**
-   * Scans the goal root folder for existing goal files and sets goalCounter to
-   * one above the highest GOAL number found. Falls back to 1 if none exist.
-   */
   async detectGoalCounter(): Promise<void> {
-    const { goalRootFolder, goalLabel } = this.settings;
-    const files = this.app.vault.getMarkdownFiles();
-    let maxNum = 0;
-    const pattern = new RegExp(`^\\[${goalLabel}-(\\d+)\\]`);
-
-    for (const file of files) {
-      if (goalRootFolder && !file.path.startsWith(`${goalRootFolder}/`)) continue;
-      const match = file.name.match(pattern);
-      if (match) {
-        const num = parseInt(match[1]!, 10);
-        if (num > maxNum) maxNum = num;
-      }
-    }
-
-    this.settings.goalCounter = maxNum + 1;
-    await this.saveSettings();
+    await this.detectCounter(this.settings.goalRootFolder, this.settings.goalLabel, n => { this.settings.goalCounter = n; });
   }
 
-  /**
-   * Renames all task files to use the current taskLabel setting.
-   * Skips files that would conflict with existing filenames.
-   */
-  async renameAllTaskFiles(): Promise<void> {
-    const { rootFolder, taskLabel } = this.settings;
+  private async renameAllFiles(rootFolder: string, label: string, fileType: string): Promise<void> {
     const files = this.app.vault.getMarkdownFiles();
     const pattern = /^\[(.+?)-(\d+)\] (.+)\.md$/;
-
     let renamedCount = 0;
     let skippedCount = 0;
-
     for (const file of files) {
-      // Only process files in the root folder
       if (rootFolder && !file.path.startsWith(`${rootFolder}/`)) continue;
-
       const match = file.name.match(pattern);
-      if (match) {
-        const [, currentLabel, number, title] = match;
-
-        // Skip if already using the correct label
-        if (currentLabel === taskLabel) continue;
-
-        // Build new filename with current label
-        const newFileName = `[${taskLabel}-${number}] ${title}.md`;
-        const newPath = file.parent ? `${file.parent.path}/${newFileName}` : newFileName;
-
-        // Check if target already exists (conflict)
-        const existing = this.app.vault.getAbstractFileByPath(newPath);
-        if (existing) {
-          skippedCount++;
-          continue;
-        }
-
-        // Rename the file (this updates all links in the vault)
-        await this.app.vault.rename(file, newPath);
-        renamedCount++;
-      }
+      if (!match) continue;
+      const [, currentLabel, number, title] = match;
+      if (currentLabel === label) continue;
+      const newFileName = `[${label}-${number}] ${title}.md`;
+      const newPath = file.parent ? `${file.parent.path}/${newFileName}` : newFileName;
+      if (this.app.vault.getAbstractFileByPath(newPath)) { skippedCount++; continue; }
+      await this.app.vault.rename(file, newPath);
+      renamedCount++;
     }
-
-    new Notice(`Taskflow: Renamed ${renamedCount} task file(s). Skipped ${skippedCount} due to conflicts.`);
+    new Notice(`Taskflow: Renamed ${renamedCount} ${fileType} file(s). Skipped ${skippedCount} due to conflicts.`);
   }
 
-  /**
-   * Renames all goal files to use the current goalLabel setting.
-   * Skips files that would conflict with existing filenames.
-   */
+  async renameAllTaskFiles(): Promise<void> {
+    await this.renameAllFiles(this.settings.rootFolder, this.settings.taskLabel, 'task');
+  }
+
   async renameAllGoalFiles(): Promise<void> {
-    const { goalRootFolder, goalLabel } = this.settings;
-    const files = this.app.vault.getMarkdownFiles();
-    const pattern = /^\[(.+?)-(\d+)\] (.+)\.md$/;
-
-    let renamedCount = 0;
-    let skippedCount = 0;
-
-    for (const file of files) {
-      // Only process files in the goal root folder
-      if (goalRootFolder && !file.path.startsWith(`${goalRootFolder}/`)) continue;
-
-      const match = file.name.match(pattern);
-      if (match) {
-        const [, currentLabel, number, title] = match;
-
-        // Skip if already using the correct label
-        if (currentLabel === goalLabel) continue;
-
-        // Build new filename with current label
-        const newFileName = `[${goalLabel}-${number}] ${title}.md`;
-        const newPath = file.parent ? `${file.parent.path}/${newFileName}` : newFileName;
-
-        // Check if target already exists (conflict)
-        const existing = this.app.vault.getAbstractFileByPath(newPath);
-        if (existing) {
-          skippedCount++;
-          continue;
-        }
-
-        // Rename the file (this updates all links in the vault)
-        await this.app.vault.rename(file, newPath);
-        renamedCount++;
-      }
-    }
-
-    new Notice(`Taskflow: Renamed ${renamedCount} goal file(s). Skipped ${skippedCount} due to conflicts.`);
+    await this.renameAllFiles(this.settings.goalRootFolder, this.settings.goalLabel, 'goal');
   }
 
   /**
    * Moves the currently active task file to the configured icebox folder.
    */
-  async moveToIcebox() {
-    const activeFile = this.app.workspace.getActiveFile();
-    if (!activeFile) return;
-
+  async moveTaskToIcebox() {
     const { taskLabel, rootFolder, iceboxFolder } = this.settings;
-    if (!activeFile.name.startsWith(`[${taskLabel}-`)) {
-      new Notice('Taskflow: Active file is not a task file.');
-      return;
-    }
-    const absoluteIcebox = buildPath(rootFolder, iceboxFolder);
-    if (!absoluteIcebox) {
-      new Notice('Taskflow: Icebox folder is not configured.');
-      return;
-    }
-
-    const currentFolder = activeFile.parent?.path || '';
-    if (currentFolder === absoluteIcebox) {
-      new Notice('Taskflow: File is already in the icebox.');
-      return;
-    }
-
-    const newPath = `${absoluteIcebox}/${activeFile.name}`;
-    await this.ensureFolder(absoluteIcebox);
-    await this.app.vault.rename(activeFile, newPath);
-    new Notice('Taskflow: Moved to icebox.');
+    await this.manualMoveFile({
+      label: taskLabel, fileType: 'task',
+      targetFolder: buildPath(rootFolder, iceboxFolder),
+      notConfiguredMsg: 'Taskflow: Icebox folder is not configured.',
+      alreadyThereMsg: 'Taskflow: File is already in the icebox.',
+      movedMsg: 'Taskflow: Moved to icebox.',
+    });
   }
 
-  /**
-   * Moves the currently active task file from the backlog to the root folder.
-   */
-  async moveOutOfBacklog() {
-    const activeFile = this.app.workspace.getActiveFile();
-    if (!activeFile) return;
-
+  async moveTaskOutOfBacklog() {
     const { taskLabel, rootFolder } = this.settings;
-    if (!activeFile.name.startsWith(`[${taskLabel}-`)) {
-      new Notice('Taskflow: Active file is not a task file.');
-      return;
-    }
-    const targetFolder = rootFolder || '';
-    const currentFolder = activeFile.parent?.path || '';
-
-    if (currentFolder === targetFolder) {
-      new Notice('Taskflow: File is already in the root folder.');
-      return;
-    }
-
-    const newPath = targetFolder
-      ? `${targetFolder}/${activeFile.name}`
-      : activeFile.name;
-    await this.ensureFolder(targetFolder);
-    await this.app.vault.rename(activeFile, newPath);
-    new Notice('Taskflow: Moved out of backlog.');
+    await this.manualMoveFile({
+      label: taskLabel, fileType: 'task',
+      targetFolder: rootFolder || '',
+      notConfiguredMsg: '',
+      alreadyThereMsg: 'Taskflow: File is already in the root folder.',
+      movedMsg: 'Taskflow: Moved out of backlog.',
+    });
   }
 
-  /**
-   * Moves the currently active goal file to the configured goal icebox folder.
-   */
   async moveGoalToIcebox() {
-    const activeFile = this.app.workspace.getActiveFile();
-    if (!activeFile) return;
-
     const { goalLabel, goalRootFolder, goalIceboxFolder } = this.settings;
-    if (!activeFile.name.startsWith(`[${goalLabel}-`)) {
-      new Notice('Taskflow: Active file is not a goal file.');
-      return;
-    }
-    const absoluteIcebox = buildPath(goalRootFolder, goalIceboxFolder);
-    if (!absoluteIcebox) {
-      new Notice('Taskflow: Goal icebox folder is not configured.');
-      return;
-    }
-
-    const currentFolder = activeFile.parent?.path || '';
-    if (currentFolder === absoluteIcebox) {
-      new Notice('Taskflow: File is already in the icebox.');
-      return;
-    }
-
-    const newPath = `${absoluteIcebox}/${activeFile.name}`;
-    await this.ensureFolder(absoluteIcebox);
-    await this.app.vault.rename(activeFile, newPath);
-    new Notice('Taskflow: Moved to icebox.');
+    await this.manualMoveFile({
+      label: goalLabel, fileType: 'goal',
+      targetFolder: buildPath(goalRootFolder, goalIceboxFolder),
+      notConfiguredMsg: 'Taskflow: Goal icebox folder is not configured.',
+      alreadyThereMsg: 'Taskflow: File is already in the icebox.',
+      movedMsg: 'Taskflow: Moved to icebox.',
+    });
   }
 
-  /**
-   * Moves the currently active goal file from the backlog to the goal root folder.
-   */
   async moveGoalOutOfBacklog() {
-    const activeFile = this.app.workspace.getActiveFile();
-    if (!activeFile) return;
-
     const { goalLabel, goalRootFolder } = this.settings;
-    if (!activeFile.name.startsWith(`[${goalLabel}-`)) {
-      new Notice('Taskflow: Active file is not a goal file.');
-      return;
-    }
-    const targetFolder = goalRootFolder || '';
-    const currentFolder = activeFile.parent?.path || '';
-
-    if (currentFolder === targetFolder) {
-      new Notice('Taskflow: File is already in the goal root folder.');
-      return;
-    }
-
-    const newPath = targetFolder
-      ? `${targetFolder}/${activeFile.name}`
-      : activeFile.name;
-    await this.ensureFolder(targetFolder);
-    await this.app.vault.rename(activeFile, newPath);
-    new Notice('Taskflow: Moved out of backlog.');
+    await this.manualMoveFile({
+      label: goalLabel, fileType: 'goal',
+      targetFolder: goalRootFolder || '',
+      notConfiguredMsg: '',
+      alreadyThereMsg: 'Taskflow: File is already in the goal root folder.',
+      movedMsg: 'Taskflow: Moved out of backlog.',
+    });
   }
 
-  /**
-   * Moves the currently active task file to the backlog folder.
-   */
-  async moveToBacklog() {
-    const activeFile = this.app.workspace.getActiveFile();
-    if (!activeFile) return;
-
+  async moveTaskToBacklog() {
     const { taskLabel, rootFolder, backlogFolder } = this.settings;
-    if (!activeFile.name.startsWith(`[${taskLabel}-`)) {
-      new Notice('Taskflow: Active file is not a task file.');
-      return;
-    }
-    const absoluteBacklog = buildPath(rootFolder, backlogFolder);
-    if (!absoluteBacklog) {
-      new Notice('Taskflow: Backlog folder is not configured.');
-      return;
-    }
-
-    const currentFolder = activeFile.parent?.path || '';
-    if (currentFolder === absoluteBacklog) {
-      new Notice('Taskflow: File is already in the backlog.');
-      return;
-    }
-
-    const newPath = `${absoluteBacklog}/${activeFile.name}`;
-    await this.ensureFolder(absoluteBacklog);
-    await this.app.vault.rename(activeFile, newPath);
-    new Notice('Taskflow: Moved to backlog.');
+    await this.manualMoveFile({
+      label: taskLabel, fileType: 'task',
+      targetFolder: buildPath(rootFolder, backlogFolder),
+      notConfiguredMsg: 'Taskflow: Backlog folder is not configured.',
+      alreadyThereMsg: 'Taskflow: File is already in the backlog.',
+      movedMsg: 'Taskflow: Moved to backlog.',
+    });
   }
 
-  /**
-   * Moves the currently active task file to the archive (true) folder.
-   */
   async archiveTask() {
-    const activeFile = this.app.workspace.getActiveFile();
-    if (!activeFile) return;
-
     const { taskLabel, rootFolder, trueFolder } = this.settings;
-    if (!activeFile.name.startsWith(`[${taskLabel}-`)) {
-      new Notice('Taskflow: Active file is not a task file.');
-      return;
-    }
-    const absoluteArchive = buildPath(rootFolder, trueFolder);
-    if (!absoluteArchive) {
-      new Notice('Taskflow: Archive folder is not configured.');
-      return;
-    }
-
-    const currentFolder = activeFile.parent?.path || '';
-    if (currentFolder === absoluteArchive) {
-      new Notice('Taskflow: File is already in the archive.');
-      return;
-    }
-
-    const newPath = `${absoluteArchive}/${activeFile.name}`;
-    await this.ensureFolder(absoluteArchive);
-    await this.app.vault.rename(activeFile, newPath);
-    new Notice('Taskflow: Moved to archive.');
+    await this.manualMoveFile({
+      label: taskLabel, fileType: 'task',
+      targetFolder: buildPath(rootFolder, trueFolder),
+      notConfiguredMsg: 'Taskflow: Archive folder is not configured.',
+      alreadyThereMsg: 'Taskflow: File is already in the archive.',
+      movedMsg: 'Taskflow: Moved to archive.',
+    });
   }
 
-  /**
-   * Moves the currently active goal file to the goal backlog folder.
-   */
   async moveGoalToBacklog() {
-    const activeFile = this.app.workspace.getActiveFile();
-    if (!activeFile) return;
-
     const { goalLabel, goalRootFolder, goalBacklogFolder } = this.settings;
-    if (!activeFile.name.startsWith(`[${goalLabel}-`)) {
-      new Notice('Taskflow: Active file is not a goal file.');
-      return;
-    }
-    const absoluteBacklog = buildPath(goalRootFolder, goalBacklogFolder);
-    if (!absoluteBacklog) {
-      new Notice('Taskflow: Goal backlog folder is not configured.');
-      return;
-    }
-
-    const currentFolder = activeFile.parent?.path || '';
-    if (currentFolder === absoluteBacklog) {
-      new Notice('Taskflow: File is already in the backlog.');
-      return;
-    }
-
-    const newPath = `${absoluteBacklog}/${activeFile.name}`;
-    await this.ensureFolder(absoluteBacklog);
-    await this.app.vault.rename(activeFile, newPath);
-    new Notice('Taskflow: Moved to backlog.');
+    await this.manualMoveFile({
+      label: goalLabel, fileType: 'goal',
+      targetFolder: buildPath(goalRootFolder, goalBacklogFolder),
+      notConfiguredMsg: 'Taskflow: Goal backlog folder is not configured.',
+      alreadyThereMsg: 'Taskflow: File is already in the backlog.',
+      movedMsg: 'Taskflow: Moved to backlog.',
+    });
   }
 
-  /**
-   * Moves the currently active goal file to the archive (true) folder.
-   */
   async archiveGoal() {
+    const { goalLabel, goalRootFolder, goalTrueFolder } = this.settings;
+    await this.manualMoveFile({
+      label: goalLabel, fileType: 'goal',
+      targetFolder: buildPath(goalRootFolder, goalTrueFolder),
+      notConfiguredMsg: 'Taskflow: Goal archive folder is not configured.',
+      alreadyThereMsg: 'Taskflow: File is already in the archive.',
+      movedMsg: 'Taskflow: Moved to archive.',
+    });
+  }
+
+  private async manualMoveFile(opts: {
+    label: string;
+    fileType: string;
+    targetFolder: string;
+    notConfiguredMsg: string;
+    alreadyThereMsg: string;
+    movedMsg: string;
+  }): Promise<void> {
     const activeFile = this.app.workspace.getActiveFile();
     if (!activeFile) return;
 
-    const { goalLabel, goalRootFolder, goalTrueFolder } = this.settings;
-    if (!activeFile.name.startsWith(`[${goalLabel}-`)) {
-      new Notice('Taskflow: Active file is not a goal file.');
+    if (!activeFile.name.startsWith(`[${opts.label}-`)) {
+      new Notice(`Taskflow: Active file is not a ${opts.fileType} file.`);
       return;
     }
-    const absoluteArchive = buildPath(goalRootFolder, goalTrueFolder);
-    if (!absoluteArchive) {
-      new Notice('Taskflow: Goal archive folder is not configured.');
+
+    if (!opts.targetFolder && opts.notConfiguredMsg) {
+      new Notice(opts.notConfiguredMsg);
       return;
     }
 
     const currentFolder = activeFile.parent?.path || '';
-    if (currentFolder === absoluteArchive) {
-      new Notice('Taskflow: File is already in the archive.');
+    if (currentFolder === opts.targetFolder) {
+      new Notice(opts.alreadyThereMsg);
       return;
     }
 
-    const newPath = `${absoluteArchive}/${activeFile.name}`;
-    await this.ensureFolder(absoluteArchive);
+    const newPath = opts.targetFolder
+      ? `${opts.targetFolder}/${activeFile.name}`
+      : activeFile.name;
+    await this.ensureFolder(opts.targetFolder);
     await this.app.vault.rename(activeFile, newPath);
-    new Notice('Taskflow: Moved to archive.');
+    new Notice(opts.movedMsg);
   }
 
   /**
@@ -578,6 +389,28 @@ export default class TaskflowPlugin extends Plugin {
       if (!existing) {
         await this.app.vault.createFolder(current);
       }
+    }
+  }
+
+  private async applyCompletedDate(
+    file: TFile,
+    propertyValue: boolean,
+    enable: boolean,
+    datePropertyName: string
+  ): Promise<void> {
+    if (!enable || !datePropertyName) return;
+    if (propertyValue === true) {
+      await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
+        if (!frontmatter[datePropertyName]) {
+          const now = new Date();
+          const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+          frontmatter[datePropertyName] = formatInTimeZone(now, timeZone, "yyyy-MM-dd");
+        }
+      });
+    } else if (propertyValue === false) {
+      await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
+        delete frontmatter[datePropertyName];
+      });
     }
   }
 
@@ -640,13 +473,28 @@ export default class TaskflowPlugin extends Plugin {
    * @param file The TFile object representing the Markdown file.
    */
   processing = new Set<string>();
-  async processFile(file: TFile) {
+  private prevDoneValue = new Map<string, boolean>();
+  private prevGoalDoneValue = new Map<string, boolean>();
+
+  private initDoneTracking(): void {
+    for (const file of this.app.vault.getMarkdownFiles()) {
+      const cache = this.app.metadataCache.getFileCache(file);
+      if (!cache?.frontmatter) continue;
+      const tv = cache.frontmatter[this.settings.propertyName];
+      if (tv === true || tv === false) this.prevDoneValue.set(file.path, tv);
+      const gv = cache.frontmatter[this.settings.goalPropertyName];
+      if (gv === true || gv === false) this.prevGoalDoneValue.set(file.path, gv);
+    }
+  }
+
+  async processTaskFile(file: TFile) {
     const originalPath = file.path;
     if (this.processing.has(originalPath)) {
       return;
     }
 
     this.processing.add(originalPath);
+    let newPath = '';
 
     try {
       const { rootFolder, propertyName, trueFolder, falseFolder, enableBacklog, backlogFolder, enableCompletedDate, completedDatePropertyName } = this.settings;
@@ -672,13 +520,23 @@ export default class TaskflowPlugin extends Plugin {
 
       const currentFolderPath = file.parent?.path || '';
       const propertyValue = fileCache.frontmatter[propertyName];
+      const prevValue = this.prevDoneValue.get(file.path);
+
+      // Update tracked value before making decisions
+      if (propertyValue === true || propertyValue === false) {
+        this.prevDoneValue.set(file.path, propertyValue);
+      } else {
+        this.prevDoneValue.delete(file.path);
+      }
+
       let targetFolder = '';
 
       if (propertyValue === true) {
         targetFolder = absoluteTrueFolder;
       } else if (propertyValue === false) {
-        if (currentFolderPath === absoluteTrueFolder) return; // archived manually, don't evict
         if (absoluteBacklogFolder && currentFolderPath === absoluteBacklogFolder) return; // in backlog, don't evict
+        // Only evict from archive if done was previously true (i.e., the done property changed)
+        if (currentFolderPath === absoluteTrueFolder && prevValue !== true) return;
         targetFolder = absoluteFalseFolder;
       } else {
         return; // Property not found or not a boolean.
@@ -688,7 +546,8 @@ export default class TaskflowPlugin extends Plugin {
         return; // Already in the correct folder.
       }
 
-      const newPath = `${targetFolder}/${file.name}`;
+      newPath = `${targetFolder}/${file.name}`;
+      this.processing.add(newPath);
 
       await this.ensureFolder(targetFolder);
 
@@ -697,26 +556,13 @@ export default class TaskflowPlugin extends Plugin {
       console.log(`Taskflow Plugin: Moved "${originalPath}" to "${newPath}"`);
 
       // 2. Then, modify the frontmatter in the new location.
-      if (enableCompletedDate && completedDatePropertyName) {
-        if (propertyValue === true) {
-          await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
-            if (!frontmatter[completedDatePropertyName]) {
-              const now = new Date();
-              const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-              frontmatter[completedDatePropertyName] = formatInTimeZone(now, timeZone, "yyyy-MM-dd");
-            }
-          });
-        } else if (propertyValue === false) {
-          await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
-            delete frontmatter[completedDatePropertyName];
-          });
-        }
-      }
+      await this.applyCompletedDate(file, propertyValue, enableCompletedDate, completedDatePropertyName);
 
     } catch (e) {
       console.error(`Taskflow Plugin: Error processing "${originalPath}":`, e);
     } finally {
       this.processing.delete(originalPath);
+      if (newPath) this.processing.delete(newPath);
     }
   }
 
@@ -813,13 +659,23 @@ export default class TaskflowPlugin extends Plugin {
 
       const currentFolderPath = file.parent?.path || '';
       const propertyValue = fileCache.frontmatter[goalPropertyName];
+      const prevValue = this.prevGoalDoneValue.get(file.path);
+
+      // Update tracked value before making decisions
+      if (propertyValue === true || propertyValue === false) {
+        this.prevGoalDoneValue.set(file.path, propertyValue);
+      } else {
+        this.prevGoalDoneValue.delete(file.path);
+      }
+
       let targetFolder = '';
 
       if (propertyValue === true) {
         targetFolder = absoluteTrueFolder;
       } else if (propertyValue === false) {
-        if (currentFolderPath === absoluteTrueFolder) return; // archived manually, don't evict
         if (absoluteGoalBacklogFolder && currentFolderPath === absoluteGoalBacklogFolder) return; // in backlog, don't evict
+        // Only evict from archive if done was previously true (i.e., the done property changed)
+        if (currentFolderPath === absoluteTrueFolder && prevValue !== true) return;
         targetFolder = absoluteFalseFolder;
       }
 
@@ -834,21 +690,7 @@ export default class TaskflowPlugin extends Plugin {
         console.log(`Taskflow Plugin: Moved "${originalPath}" to "${newPath}"`);
 
         // 2. Then, modify the frontmatter in the new location.
-        if (enableGoalCompletedDate && goalCompletedDatePropertyName) {
-          if (propertyValue === true) {
-            await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
-              if (!frontmatter[goalCompletedDatePropertyName]) {
-                const now = new Date();
-                const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-                frontmatter[goalCompletedDatePropertyName] = formatInTimeZone(now, timeZone, "yyyy-MM-dd");
-              }
-            });
-          } else if (propertyValue === false) {
-            await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
-              delete frontmatter[goalCompletedDatePropertyName];
-            });
-          }
-        }
+        await this.applyCompletedDate(file, propertyValue, enableGoalCompletedDate, goalCompletedDatePropertyName);
       }
 
       // Handle child task completion when goal is marked done
@@ -981,7 +823,7 @@ class CreateTaskModal extends Modal {
 
     await this.plugin.ensureFolder(targetFolder);
 
-    // Suppress processFile from reacting to the newly created file.
+    // Suppress processTaskFile from reacting to the newly created file.
     this.plugin.processing.add(filePath);
     const file = await this.app.vault.create(filePath, content);
     setTimeout(() => this.plugin.processing.delete(filePath), 500);
